@@ -211,7 +211,7 @@ Now that Git, a compiler, and Python are installed, put it all together:
 
    ```
    git clone git@github.com:SmallSatGasTeam/Workshops.git
-   cd Workshops
+   cd Workshops/FSW/src/Workshops
    ```
 
 2. **Create and activate your virtual environment** (inside the cloned repo):
@@ -230,7 +230,7 @@ Now that Git, a compiler, and Python are installed, put it all together:
 4. **Install F' dependencies.** Replace `<project>` below with the name of the specific workshop project directory you're working in (for example, `FSW`):
 
    ```
-   pip install -r <project>/fprime/requirements.txt
+   pip install -r lib/fprime/requirements.txt
    ```
 
 You're all set! 🎉 From here, continue to `running-workshops.md` found in the same directory this file is in.
