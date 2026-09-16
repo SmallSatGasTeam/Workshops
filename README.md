@@ -17,7 +17,6 @@ FSW/
     ├── lib/fprime/           # F' framework (git submodule)
     └── Workshops/
         ├── Components/
-        │   ├── IMUManager/   # Reference/complete IMU driver component
         │   └── IMUWorkshop/  # Teaching component for the workshop — some
         │                     # handlers are left as exercises for participants
         └── Deployments/
@@ -25,8 +24,7 @@ FSW/
                                          # that wires IMUWorkshop into a topology
 ```
 
-- **`IMUManager`** is a fully-implemented IMU driver component (I2C config/read sequencing, telemetry publishing via a lookup table of writer functions).
-- **`IMUWorkshop`** is the component participants actually work on during the workshop — it mirrors `IMUManager`'s I2C/config logic, but stores decoded sensor readings in a plain struct (`tlmData`) and gates which telemetry channels get published behind per-sensor `enable_*` ground commands.
+- **`IMUWorkshop`** is the component participants work on during the workshop — it drives a BNO055-style 9-DOF IMU over I2C (configuration/read sequencing), stores decoded sensor readings in a plain struct (`tlmData`), and gates which telemetry channels get published behind per-sensor `enable_*` ground commands.
 - **`IMUWorkshopDeployment`** is the deployment that runs `IMUWorkshop` on real hardware (e.g. a Raspberry Pi with an I2C IMU attached) and exposes it to a ground data system (GDS) over TCP.
 
 ### Getting started
