@@ -1,0 +1,3 @@
+[submodule "FSW/src/Workshops/lib/fprime"]
+	path = FSW/src/Workshops/lib/fprime
+	url = https://github.com/nasa/fprime.git
