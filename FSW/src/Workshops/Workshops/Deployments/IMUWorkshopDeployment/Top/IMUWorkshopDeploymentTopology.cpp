@@ -10,6 +10,7 @@
 
 // Necessary project-specified types
 #include <Fw/Types/MallocAllocator.hpp>
+#include <cstdio>
 
 // Public functions for use in main program are namespaced with deployment module Deployments
 // This is also the namespace where the topology components are instantiated by FPP.
@@ -53,6 +54,13 @@ void configureTopology() {
 
     // PrmDb file name must be supplied by the using topology
     FileHandling::prmDb.configure("PrmDb.dat");
+
+    // I2C Setup
+    const char* device = "/dev/i2c-1";
+    if (!i2cLinuxDriver.open(device)) {
+        // CASE: The i2c driver fails to open the device
+        printf("Failed to open I2C device: %s\n", device);
+    }
 }
 
 void setupTopology(const TopologyState& state) {
