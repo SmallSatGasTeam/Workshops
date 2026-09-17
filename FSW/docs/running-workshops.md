@@ -18,6 +18,7 @@ To build:
 
 ```
 cd Workshops/Deployments/IMUWorkshopDeployment
+fprime-util generate
 fprime-util build
 ```
 
@@ -45,21 +46,44 @@ Usage: ./IMUWorkshopDeployment [options]
 
 ### Running locally (same machine as GDS)
 
-```
-cd build-artifacts/Linux/Workshops_Deployments_IMUWorkshopDeployment/bin
-./IMUWorkshopDeployment -a 0.0.0.0 -p 50000
-```
+Launch the GDS from the deployment directory (it will auto-start the binary for you if you omit `-n`, or you can point it at the dictionary directly):
 
-Then, in another terminal, launch the GDS from the deployment directory (it will auto-start the binary for you if you omit `-n`, or you can point it at the dictionary directly):
+If you are not already in `Workshops/Deployments/IMUWorkshopDeployment` (check using `pwd`):
 
 ```
 cd Workshops/Deployments/IMUWorkshopDeployment
+```
+
+Then, once you are in the deployment directory, you can run:
+
+```
 fprime-gds
 ```
 
+This should cause a window to open in your web browser. If it doesn't open automatically, you can look in the terminal window for the hyperlink.
+
+Take the time to look around at the GUI, as there are lots of important things to see. Most importantly, there is a series of tabs at the top which contain different features:
+![alt text](image.png)
+
+The **Commanding** tab will contain all of the commands (go to **Dictionaries** if you are interested in seeing what each command does).
+
+The **Events** tab contains events that happen in the flight software. Events are used to log important events - crazy as it seems. An example event would be "Command Received" after the ground sends a command to the satellite.
+
+The **Channels** tab contains all of the telemetry channels in the flight software. These include resource usage (memory), commands executed, and custom telemetry channels which each component can define. In our case, `IMUWorkshop` defines telemetry channels for each sensor within the IMU:
+- Accelerometer: Measures linear movement and directional forces (gravity)
+- Gyroscope: Measures rotational speed and angular velocity
+- Magnetometer: Measures the strength of local magnetic fields (like a compass)
+
+You can now try to run the deployment on the raspberry pi! check to make sure no one else is using it first, as only one deployment may run at a time.
+
 ### Running on a Raspberry Pi
 
-1. Copy (or build directly on) the Pi and start the deployment binary there, bound to all interfaces:
+1. SSH onto the pi, and run the deployment:
+
+   ```
+   ssh gas@pi0.gas.usu.edu
+   ```
+
 
    ```
    ./IMUWorkshopDeployment -a 0.0.0.0 -p 50000
@@ -89,8 +113,8 @@ Once connected, all commands and telemetry below are under the `IMUWorkshop` com
 The IMU must be configured before it will report data:
 
 1. Send **`IMUWorkshop.configure_sensor`** — runs the configuration sequence (sets power mode, forces `NDOF` fusion mode, checks system status).
-2. Until configuration succeeds, `schedIn` ticks will log a `configIncomplete` warning event instead of reading data.
-3. Watch for the `configEvent` event confirming *"IMU is correctly configured."*
+2. Until configuration succeeds, `schedIn` ticks will log a `configIncomplete` warning event instead of reading data. You can see this in the **Events** tab.
+3. Watch for the `configEvent` event confirming *"IMU is correctly configured."* in the **Events** tab.
 
 If something goes wrong, **`IMUWorkshop.restart_sensor`** issues a reset trigger to the IMU (you'll need to `configure_sensor` again afterward).
 
