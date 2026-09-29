@@ -61,7 +61,7 @@ void IMUWorkshop ::config() {
     }
 
     this->configFails = 0;
-    
+
     msg = "IMU is correctly configured.";
     this->log_WARNING_LO_configEvent(msg);
     this->initialized = true;
@@ -151,6 +151,7 @@ void IMUWorkshop ::schedIn_handler(FwIndexType portNum, U32 context) {
         }
 
         if (quaEnabled) {
+            this->tlmWrite_qua_w(tlmData.quaW);
             this->tlmWrite_qua_x(tlmData.quaX);
             this->tlmWrite_qua_y(tlmData.quaY);
             this->tlmWrite_qua_z(tlmData.quaZ);
@@ -161,7 +162,7 @@ void IMUWorkshop ::schedIn_handler(FwIndexType portNum, U32 context) {
             this->tlmWrite_lia_y(tlmData.liaY);
             this->tlmWrite_lia_z(tlmData.liaZ);
         }
-        
+
         if (readBuff.isValid()) {
             this->deallocate_out(0, readBuff);
         }
@@ -297,7 +298,7 @@ void IMUWorkshop::checkStatus(Drv::I2cStatus i2cStatus) {
       return 0xFF;
     }
     readBuff.setSize(1);
-    
+
     Fw::ExternalSerializeBufferWithMemberCopy 
             rdSerial = readBuff.getDeserializer();
     Fw::ExternalSerializeBufferWithMemberCopy 
@@ -347,7 +348,7 @@ void IMUWorkshop::checkStatus(Drv::I2cStatus i2cStatus) {
       return;
     }
     writeBuff.setSize(2);
-    
+
     Fw::ExternalSerializeBufferWithMemberCopy 
             wrSerial = writeBuff.getSerializer();
 
@@ -407,6 +408,7 @@ void IMUWorkshop::checkStatus(Drv::I2cStatus i2cStatus) {
     this->tlmData.eulY = this->readAxisValue(rdSerial, this->conversionRates[3]);
     this->tlmData.eulZ = this->readAxisValue(rdSerial, this->conversionRates[3]);
 
+    this->tlmData.quaW = this->readAxisValue(rdSerial, this->conversionRates[4]);
     this->tlmData.quaX = this->readAxisValue(rdSerial, this->conversionRates[4]);
     this->tlmData.quaY = this->readAxisValue(rdSerial, this->conversionRates[4]);
     this->tlmData.quaZ = this->readAxisValue(rdSerial, this->conversionRates[4]);

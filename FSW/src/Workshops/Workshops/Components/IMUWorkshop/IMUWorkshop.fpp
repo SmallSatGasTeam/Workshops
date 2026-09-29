@@ -45,6 +45,7 @@ module Components {
         telemetry eul_y : F32 format "{.2f}"
         telemetry eul_z : F32 format "{.2f}"
 
+        telemetry qua_w : F32 format "{.2f}"
         telemetry qua_x : F32 format "{.2f}"
         telemetry qua_y : F32 format "{.2f}"
         telemetry qua_z : F32 format "{.2f}"
