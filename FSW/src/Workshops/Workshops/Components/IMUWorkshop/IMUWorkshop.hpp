@@ -150,7 +150,7 @@ class IMUWorkshop final : public IMUWorkshopComponentBase {
       F32 magX, magY, magZ;
       F32 gyrX, gyrY, gyrZ;
       F32 eulX, eulY, eulZ;
-      F32 quaX, quaY, quaZ;
+      F32 quaW, quaX, quaY, quaZ;
       F32 liaX, liaY, liaZ;
       F32 grvX, grvY, grvZ;
       I8 temp;
@@ -187,7 +187,7 @@ class IMUWorkshop final : public IMUWorkshopComponentBase {
     static constexpr U8 SYS_TRIGGER = 0x3F;
 
     //Other Constants
-    static constexpr U32 NUM_DT_BYT = 43;
+    static constexpr U32 NUM_DT_BYT = 45;
     static constexpr U8 NDOF = 0x0C;
     static constexpr U8 FUSION_RUNNING = 0x05;
     static constexpr U8 NO_ERR = 0x00;
