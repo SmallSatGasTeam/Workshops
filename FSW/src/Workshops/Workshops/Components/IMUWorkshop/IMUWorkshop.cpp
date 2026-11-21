@@ -5,6 +5,8 @@
 // ======================================================================
 
 #include "Workshops/Components/IMUWorkshop/IMUWorkshop.hpp"
+#include <Fw/Time/TimeInterval.hpp>
+#include <Os/Task.hpp>
 
 namespace Components {
 
@@ -20,94 +22,181 @@ IMUWorkshop ::~IMUWorkshop() {}
 // Handler implementations for typed input ports
 // ----------------------------------------------------------------------
 
-void IMUWorkshop ::config() {    
-    U8 val;
+bool IMUWorkshop ::config() {
+    U8 oprVal = 0;
+    U8 pwrVal = 0;
     Fw::String msg;
-    U8 PWR_STATE = 0x00;
 
-    //Check that the power mode is correct
-    val = this->readConfigReg(this->PWR_MODE);
-    val = val & 0x03; //Only bottom 2 bits hold data
+    // Ensure register map Page 0 is selected before accessing Page 0 registers
+    U8 pageVal = 0;
+    if (!this->readConfigReg(this->PAGE_ID, pageVal, 0xFE)) {
+        msg = "Failed to read PAGE_ID register.";
+        this->log_WARNING_HI_configError(msg);
+        this->configFails++;
+        return false;
+    }
+    if (pageVal != 0x00 && !this->writeConfigReg(this->PAGE_ID, 0x00)) {
+        msg = "Failed to select IMU register Page 0.";
+        this->log_WARNING_HI_configError(msg);
+        this->configFails++;
+        return false;
+    }
 
-    this->writeConfigReg(this->PWR_MODE, PWR_STATE);    
-    
-    //Check that the operation mode is correct
-    val = this->readConfigReg(this->OPR_MODE);
-    val = val & 0x0F;
-    if(val != this->NDOF) {
+    // Read current operation mode (bits 7:4 are reserved 0 on BNO055)
+    if (!this->readConfigReg(this->OPR_MODE, oprVal, 0xF0)) {
+        msg = "Failed to read OPR_MODE register.";
+        this->log_WARNING_HI_configError(msg);
+        this->configFails++;
+        return false;
+    }
+    oprVal &= 0x0F;
+
+    // Read current power mode (bits 7:2 are reserved 0 on BNO055)
+    if (!this->readConfigReg(this->PWR_MODE, pwrVal, 0xFC)) {
+        msg = "Failed to read PWR_MODE register.";
+        this->log_WARNING_HI_configError(msg);
+        this->configFails++;
+        return false;
+    }
+    pwrVal &= 0x03;
+
+    // Only reconfigure registers if power mode is not NORMAL or operation mode is not NDOF
+    if (pwrVal != this->PWR_NORMAL || oprVal != this->NDOF) {
+        this->initialized = false;
+
+        // BNO055 requires CONFIGMODE (0x00) before modifying configuration/power registers
+        if (oprVal != this->CONFIG_MODE) {
+            bool inConfig = false;
+            for (U32 attempt = 0; attempt < this->MAX_I2C_RETRIES; attempt++) {
+                if (this->writeConfigReg(this->OPR_MODE, this->CONFIG_MODE)) {
+                    // Datasheet requires >= 19 ms when switching from any operation mode to CONFIGMODE
+                    (void)Os::Task::delay(Fw::TimeInterval(0, 25000));
+                    if (this->readConfigReg(this->OPR_MODE, oprVal, 0xF0) &&
+                        ((oprVal & 0x0F) == this->CONFIG_MODE)) {
+                        inConfig = true;
+                        break;
+                    }
+                }
+                (void)Os::Task::delay(Fw::TimeInterval(0, 10000));
+            }
+            if (!inConfig) {
+                msg = "Failed to switch IMU to CONFIGMODE.";
+                this->log_WARNING_HI_configError(msg);
+                this->configFails++;
+                return false;
+            }
+        }
+
+        // Only write PWR_MODE when needed (while safely in CONFIGMODE)
+        if (pwrVal != this->PWR_NORMAL) {
+            msg = "Power mode incorrect, updating to NORMAL.";
+            this->log_WARNING_LO_configEvent(msg);
+            if (!this->writeConfigReg(this->PWR_MODE, this->PWR_NORMAL)) {
+                msg = "Failed to write PWR_MODE register.";
+                this->log_WARNING_HI_configError(msg);
+                this->configFails++;
+                return false;
+            }
+            (void)Os::Task::delay(Fw::TimeInterval(0, 15000));
+        }
+
+        // Switch operation mode to NDOF (0x0C) and verify it latched
         msg = "Operation mode incorrect, updating to NDOF.";
         this->log_WARNING_LO_configEvent(msg);
-        this->writeConfigReg(this->OPR_MODE, this->NDOF);
-        return;
-    }
 
-    //Check system status and potentially system error
-    val = this->readConfigReg(this->SYS_STATUS);
-    if(val == this->CONFIG_ERROR) { //If Showing there's an error
-        //Check system error
-        val = this->readConfigReg(this->SYS_ERR);
-        if(val != this->NO_ERR) {
-            this->log_WARNING_HI_deviceError(val);
+        bool modeSet = false;
+        for (U32 attempt = 0; attempt < this->MAX_I2C_RETRIES; attempt++) {
+            if (this->writeConfigReg(this->OPR_MODE, this->NDOF)) {
+                // Datasheet requires >= 7 ms from CONFIGMODE to NDOF; allow 30 ms for mode transition
+                (void)Os::Task::delay(Fw::TimeInterval(0, 30000));
+                if (this->readConfigReg(this->OPR_MODE, oprVal, 0xF0) &&
+                    ((oprVal & 0x0F) == this->NDOF)) {
+                    modeSet = true;
+                    break;
+                }
+            }
+            (void)Os::Task::delay(Fw::TimeInterval(0, 10000));
+        }
+
+        if (!modeSet) {
+            msg = "Failed to set IMU operation mode to NDOF.";
+            this->log_WARNING_HI_configError(msg);
             this->configFails++;
-            return;
+            return false;
         }
     }
-    else if(val != this->FUSION_RUNNING) {
-        msg = 
-            "System status not *Fusion*. Wait for IMU to finish initialization.";
+
+    // Poll SYS_STATUS until sensor fusion algorithm is running (0x05)
+    U8 statusVal = 0xFF;
+    for (U32 poll = 0; poll < this->MAX_FUSION_POLLS; poll++) {
+        if (this->readConfigReg(this->SYS_STATUS, statusVal, 0xF8)) {
+            if (statusVal == this->FUSION_RUNNING) {
+                break;
+            }
+            if (statusVal == this->CONFIG_ERROR) {
+                U8 errVal = 0;
+                if (this->readConfigReg(this->SYS_ERR, errVal, 0xF0) && errVal != this->NO_ERR) {
+                    this->log_WARNING_HI_deviceError(errVal);
+                    this->configFails++;
+                    return false;
+                }
+            }
+        }
+        (void)Os::Task::delay(Fw::TimeInterval(0, 50000));
+    }
+
+    if (statusVal != this->FUSION_RUNNING) {
+        msg = "System status not *Fusion*. Wait for IMU to finish initialization.";
         this->log_WARNING_LO_configEvent(msg);
         this->configFails++;
-        return;
+        return false;
     }
 
     this->configFails = 0;
-    
+
     msg = "IMU is correctly configured.";
     this->log_WARNING_LO_configEvent(msg);
     this->initialized = true;
-    return;
+    return true;
 }
 
 void IMUWorkshop ::schedIn_handler(FwIndexType portNum, U32 context) {
-    // On every tick, we are just going to read the sensor data,
-    // then log that data to telemetry channels if they are active
-
+    // On every tick, read the sensor data and publish enabled telemetry channels
     if (this->initialized) {
-        //Initialize buffers
-        Fw::Buffer writeBuff = this->allocate_out(0,sizeof(U8));
-
-        if(writeBuff.getSize() < sizeof(U8)) {
+        Fw::Buffer writeBuff = this->allocate_out(0, sizeof(U8));
+        if (writeBuff.getSize() < sizeof(U8)) {
             if (writeBuff.isValid()) {
-                this->deallocate_out(0,writeBuff);
+                this->deallocate_out(0, writeBuff);
             }
             this->log_WARNING_LO_MemoryAllocationFailed();
             return;
         }
         writeBuff.setSize(1);
 
-        Fw::Buffer readBuff = this->allocate_out(0,this->NUM_DT_BYT);
-        if(readBuff.getSize() < this->NUM_DT_BYT) {
+        Fw::Buffer readBuff = this->allocate_out(0, this->NUM_DT_BYT);
+        if (readBuff.getSize() < this->NUM_DT_BYT) {
             if (readBuff.isValid()) {
-                this->deallocate_out(0,readBuff);
+                this->deallocate_out(0, readBuff);
             }
             if (writeBuff.isValid()) {
-                this->deallocate_out(0,writeBuff);
+                this->deallocate_out(0, writeBuff);
             }
             this->log_WARNING_LO_MemoryAllocationFailed();
             return;
         }
         readBuff.setSize(this->NUM_DT_BYT);
 
-        // Read all 43 bytes of data from the IMU
-        Fw::ExternalSerializeBufferWithMemberCopy 
-                wrSerial = writeBuff.getSerializer();
-        wrSerial.serializeFrom(this->DATA_ADDR);
-        Drv::I2cStatus status = this->i2cWriteRead_out(
-            0,
-            this->ADDRESS,
-            writeBuff,
-            readBuff
-        );
+        // Read all 45 bytes of sensor data (0x08..0x34) from the IMU
+        Drv::I2cStatus status = Drv::I2cStatus::I2C_OTHER_ERR;
+        for (U32 attempt = 0; attempt < this->MAX_I2C_RETRIES; attempt++) {
+            Fw::ExternalSerializeBufferWithMemberCopy wrSerial = writeBuff.getSerializer();
+            (void)wrSerial.serializeFrom(this->DATA_ADDR);
+            status = this->i2cWriteRead_out(0, this->ADDRESS, writeBuff, readBuff);
+            if (status == Drv::I2cStatus::I2C_OK) {
+                break;
+            }
+            (void)Os::Task::delay(Fw::TimeInterval(0, 5000));
+        }
         this->checkStatus(status);
         if (status != Drv::I2cStatus::I2C_OK) {
             if (readBuff.isValid()) {
@@ -121,55 +210,60 @@ void IMUWorkshop ::schedIn_handler(FwIndexType portNum, U32 context) {
 
         this->deserializeData(readBuff);
 
-        // Check if each telemetry channel is enabled, if so write to that telemetry channel
-        if (tmpEnabled) {
-            this->tlmWrite_temp(tlmData.temp);
+        // Check if each telemetry channel group is enabled; if so, publish to telemetry
+        if (this->tmpEnabled) {
+            this->tlmWrite_temp(this->tlmData.temp);
         }
 
-        if (gyrEnabled) {
-            this->tlmWrite_gyr_x(tlmData.gyrX);
-            this->tlmWrite_gyr_y(tlmData.gyrY);
-            this->tlmWrite_gyr_z(tlmData.gyrZ);
+        if (this->gyrEnabled) {
+            this->tlmWrite_gyr_x(this->tlmData.gyrX);
+            this->tlmWrite_gyr_y(this->tlmData.gyrY);
+            this->tlmWrite_gyr_z(this->tlmData.gyrZ);
         }
 
-        if (accEnabled) {
-            this->tlmWrite_acc_x(tlmData.accX);
-            this->tlmWrite_acc_y(tlmData.accY);
-            this->tlmWrite_acc_z(tlmData.accZ);
+        if (this->accEnabled) {
+            this->tlmWrite_acc_x(this->tlmData.accX);
+            this->tlmWrite_acc_y(this->tlmData.accY);
+            this->tlmWrite_acc_z(this->tlmData.accZ);
         }
 
-        if (grvEnabled) {
-            this->tlmWrite_grv_x(tlmData.grvX);
-            this->tlmWrite_grv_y(tlmData.grvY);
-            this->tlmWrite_grv_z(tlmData.grvZ);
+        if (this->magEnabled) {
+            this->tlmWrite_mag_x(this->tlmData.magX);
+            this->tlmWrite_mag_y(this->tlmData.magY);
+            this->tlmWrite_mag_z(this->tlmData.magZ);
         }
 
-        if (eulEnabled) {
-            this->tlmWrite_eul_x(tlmData.eulX);
-            this->tlmWrite_eul_y(tlmData.eulY);
-            this->tlmWrite_eul_z(tlmData.eulZ);
+        if (this->grvEnabled) {
+            this->tlmWrite_grv_x(this->tlmData.grvX);
+            this->tlmWrite_grv_y(this->tlmData.grvY);
+            this->tlmWrite_grv_z(this->tlmData.grvZ);
         }
 
-        if (quaEnabled) {
-            this->tlmWrite_qua_x(tlmData.quaX);
-            this->tlmWrite_qua_y(tlmData.quaY);
-            this->tlmWrite_qua_z(tlmData.quaZ);
+        if (this->eulEnabled) {
+            this->tlmWrite_eul_x(this->tlmData.eulX);
+            this->tlmWrite_eul_y(this->tlmData.eulY);
+            this->tlmWrite_eul_z(this->tlmData.eulZ);
         }
 
-        if (linAccEnabled) {
-            this->tlmWrite_lia_x(tlmData.liaX);
-            this->tlmWrite_lia_y(tlmData.liaY);
-            this->tlmWrite_lia_z(tlmData.liaZ);
+        if (this->quaEnabled) {
+            this->tlmWrite_qua_x(this->tlmData.quaX);
+            this->tlmWrite_qua_y(this->tlmData.quaY);
+            this->tlmWrite_qua_z(this->tlmData.quaZ);
         }
-        
+
+        if (this->linAccEnabled) {
+            this->tlmWrite_lia_x(this->tlmData.liaX);
+            this->tlmWrite_lia_y(this->tlmData.liaY);
+            this->tlmWrite_lia_z(this->tlmData.liaZ);
+        }
+
         if (readBuff.isValid()) {
             this->deallocate_out(0, readBuff);
         }
         if (writeBuff.isValid()) {
             this->deallocate_out(0, writeBuff);
         }
-    }
-    else {
+    } else {
         this->log_WARNING_HI_configIncomplete();
     }
 }
@@ -179,218 +273,215 @@ void IMUWorkshop ::schedIn_handler(FwIndexType portNum, U32 context) {
 // ----------------------------------------------------------------------
 
 void IMUWorkshop ::configure_sensor_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
-    // TODO
-    this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
-    this->config();
+    const bool ok = this->config();
+    this->cmdResponse_out(opCode, cmdSeq, ok ? Fw::CmdResponse::OK : Fw::CmdResponse::EXECUTION_ERROR);
 }
 
 void IMUWorkshop ::restart_sensor_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
-    // TODO
-    this->writeConfigReg(this->SYS_TRIGGER, this->RESET_IMU);
+    this->initialized = false;
+    this->resets++;
+    (void)this->writeConfigReg(this->SYS_TRIGGER, this->RESET_IMU, 1);
+    // Allow BNO055 ~650 ms power-on reset time to complete before accepting new I2C traffic
+    (void)Os::Task::delay(Fw::TimeInterval(0, 700000));
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
-
 void IMUWorkshop ::enable_accelerometer_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bool mode) {
-    // TODO
     this->accEnabled = mode;
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
 void IMUWorkshop ::enable_eulerAngles_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bool mode) {
-    // TODO
     this->eulEnabled = mode;
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
-void IMUWorkshop ::enable_magnetometer_cmdHandler(FwOpcodeType opCode, U32 cmdSeq,bool mode) {
-    // TODO
+void IMUWorkshop ::enable_magnetometer_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bool mode) {
     this->magEnabled = mode;
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
 void IMUWorkshop ::enable_gyroscope_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bool mode) {
-    // TODO
-    this-> gyrEnabled = mode;
+    this->gyrEnabled = mode;
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
 void IMUWorkshop ::enable_quaternions_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bool mode) {
-    // TODO
     this->quaEnabled = mode;
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
 void IMUWorkshop ::enable_linearAcceleration_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bool mode) {
-    // TODO
     this->linAccEnabled = mode;
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
 void IMUWorkshop ::enable_gravityVectors_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bool mode) {
-    // TODO
     this->grvEnabled = mode;
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
 void IMUWorkshop ::enable_temperature_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bool mode) {
-    // TODO
     this->tmpEnabled = mode;
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
 void IMUWorkshop::checkStatus(Drv::I2cStatus i2cStatus) {
+    this->calls++;
     switch (i2cStatus) {
-    case Drv::I2cStatus::I2C_OK:
-        this->log_ACTIVITY_HI_i2cSuccess();
-        break;
+        case Drv::I2cStatus::I2C_OK:
+            this->log_ACTIVITY_HI_i2cSuccess();
+            break;
 
-    case Drv::I2cStatus::I2C_ADDRESS_ERR:
-        this->log_WARNING_HI_i2cAddressFailure();
-        break;
+        case Drv::I2cStatus::I2C_ADDRESS_ERR:
+            this->log_WARNING_HI_i2cAddressFailure();
+            break;
 
-    case Drv::I2cStatus::I2C_WRITE_ERR:
-        this->log_WARNING_HI_i2cWriteError();
-        break;
+        case Drv::I2cStatus::I2C_WRITE_ERR:
+            this->log_WARNING_HI_i2cWriteError();
+            break;
 
-    case Drv::I2cStatus::I2C_READ_ERR:
-        this->log_WARNING_HI_i2cReadError();
-        break;
+        case Drv::I2cStatus::I2C_READ_ERR:
+            this->log_WARNING_HI_i2cReadError();
+            break;
 
-    case Drv::I2cStatus::I2C_OPEN_ERR:
-        this->log_WARNING_HI_i2cOpenError();
-        break;
+        case Drv::I2cStatus::I2C_OPEN_ERR:
+            this->log_WARNING_HI_i2cOpenError();
+            break;
 
-    case Drv::I2cStatus::I2C_OTHER_ERR:
-        this->log_WARNING_HI_i2cOtherError();
-        break;
-    
-    default:
-        this->log_WARNING_HI_i2cOtherError();
-        break;
+        case Drv::I2cStatus::I2C_OTHER_ERR:
+            this->log_WARNING_HI_i2cOtherError();
+            break;
+
+        default:
+            this->log_WARNING_HI_i2cOtherError();
+            break;
     }
-  }
+}
 
-  U8 IMUWorkshop::readConfigReg(U8 addr) {
-    U8 val = 0xFF;
-
-    //Declare and initialize buffers
-    Fw::Buffer writeBuff = this->allocate_out(0,sizeof(U8));
-    if(writeBuff.getSize() < sizeof(U8)) {
-      if (writeBuff.isValid()) {
-        this->deallocate_out(0,writeBuff);
-      }
-      this->log_WARNING_LO_MemoryAllocationFailed();
-      return 0xFF;
+bool IMUWorkshop::readConfigReg(U8 addr, U8& val, U8 reservedMask) {
+    Fw::Buffer writeBuff = this->allocate_out(0, sizeof(U8));
+    if (writeBuff.getSize() < sizeof(U8)) {
+        if (writeBuff.isValid()) {
+            this->deallocate_out(0, writeBuff);
+        }
+        this->log_WARNING_LO_MemoryAllocationFailed();
+        return false;
     }
     writeBuff.setSize(1);
 
-    Fw::Buffer readBuff = this->allocate_out(0,sizeof(U8));
-    if(readBuff.getSize() < sizeof(U8)) {
-      if (readBuff.isValid()) {
-        this->deallocate_out(0,readBuff);
-      }
-      if (writeBuff.isValid()) {
-        this->deallocate_out(0,writeBuff);
-      }
-      this->log_WARNING_LO_MemoryAllocationFailed();
-      return 0xFF;
+    Fw::Buffer readBuff = this->allocate_out(0, sizeof(U8));
+    if (readBuff.getSize() < sizeof(U8)) {
+        if (readBuff.isValid()) {
+            this->deallocate_out(0, readBuff);
+        }
+        if (writeBuff.isValid()) {
+            this->deallocate_out(0, writeBuff);
+        }
+        this->log_WARNING_LO_MemoryAllocationFailed();
+        return false;
     }
     readBuff.setSize(1);
-    
-    Fw::ExternalSerializeBufferWithMemberCopy 
-            rdSerial = readBuff.getDeserializer();
-    Fw::ExternalSerializeBufferWithMemberCopy 
-            wrSerial = writeBuff.getSerializer();
 
-    // Fetch the value
-    wrSerial.resetSer();
-    rdSerial.resetDeser();
-    wrSerial.serializeFrom(addr);
-    Drv::I2cStatus status = this->i2cWriteRead_out(
-      0, 
-      this->ADDRESS, 
-      writeBuff, 
-      readBuff
-    );
-    this->checkStatus(status);
-    if (status != Drv::I2cStatus::I2C_OK) {
-      if (readBuff.isValid()) {
-        this->deallocate_out(0, readBuff);
-      }
-      if (writeBuff.isValid()) {
-        this->deallocate_out(0, writeBuff);
-      }
-      return 0xFF;
+    Drv::I2cStatus status = Drv::I2cStatus::I2C_OTHER_ERR;
+    bool validRead = false;
+    U8 readByte = 0xFF;
+
+    for (U32 attempt = 0; attempt < this->MAX_I2C_RETRIES; attempt++) {
+        Fw::ExternalSerializeBufferWithMemberCopy wrSerial = writeBuff.getSerializer();
+        (void)wrSerial.serializeFrom(addr);
+
+        status = this->i2cWriteRead_out(0, this->ADDRESS, writeBuff, readBuff);
+        if (status == Drv::I2cStatus::I2C_OK) {
+            Fw::ExternalSerializeBufferWithMemberCopy rdSerial = readBuff.getDeserializer();
+            rdSerial.resetDeser();
+            (void)rdSerial.deserializeTo(readByte);
+
+            // Reject bytes where reserved zero-bits were corrupted high (e.g. RPi I2C clock stretching)
+            if ((readByte & reservedMask) == 0) {
+                validRead = true;
+                break;
+            }
+        }
+        (void)Os::Task::delay(Fw::TimeInterval(0, 5000));
     }
-    rdSerial.resetDeser();
-    rdSerial.deserializeTo(val);
 
     if (readBuff.isValid()) {
-      this->deallocate_out(0, readBuff);
+        this->deallocate_out(0, readBuff);
     }
     if (writeBuff.isValid()) {
-      this->deallocate_out(0, writeBuff);
+        this->deallocate_out(0, writeBuff);
     }
 
-    return val;
-  }
+    if (!validRead) {
+        if (status != Drv::I2cStatus::I2C_OK) {
+            this->checkStatus(status);
+        } else {
+            this->log_WARNING_HI_i2cReadError();
+        }
+        return false;
+    }
 
-  void IMUWorkshop::writeConfigReg(U8 addr, U8 byte) {
-    //Declare and initialize buffers
-    Fw::Buffer writeBuff = this->allocate_out(0,sizeof(U8 [2]));
-    if(writeBuff.getSize() < sizeof(U8 [2])) {
-      if (writeBuff.isValid()) {
-        this->deallocate_out(0,writeBuff);
-      }
-      this->log_WARNING_LO_MemoryAllocationFailed();
-      return;
+    this->checkStatus(status);
+    val = readByte;
+    return true;
+}
+
+bool IMUWorkshop::writeConfigReg(U8 addr, U8 byte, U32 maxRetries) {
+    Fw::Buffer writeBuff = this->allocate_out(0, sizeof(U8[2]));
+    if (writeBuff.getSize() < sizeof(U8[2])) {
+        if (writeBuff.isValid()) {
+            this->deallocate_out(0, writeBuff);
+        }
+        this->log_WARNING_LO_MemoryAllocationFailed();
+        return false;
     }
     writeBuff.setSize(2);
-    
-    Fw::ExternalSerializeBufferWithMemberCopy 
-            wrSerial = writeBuff.getSerializer();
 
-    // Fetch the value
-    wrSerial.resetSer();
-    wrSerial.serializeFrom(addr);
-    wrSerial.serializeFrom(byte);
-    Drv::I2cStatus status = this->i2cWrite_out(0, this->ADDRESS, writeBuff);
+    Drv::I2cStatus status = Drv::I2cStatus::I2C_OTHER_ERR;
+    const U32 tries = (maxRetries > 0) ? maxRetries : 1;
+
+    for (U32 attempt = 0; attempt < tries; attempt++) {
+        Fw::ExternalSerializeBufferWithMemberCopy wrSerial = writeBuff.getSerializer();
+        (void)wrSerial.serializeFrom(addr);
+        (void)wrSerial.serializeFrom(byte);
+
+        status = this->i2cWrite_out(0, this->ADDRESS, writeBuff);
+        if (status == Drv::I2cStatus::I2C_OK) {
+            break;
+        }
+        if (attempt + 1 < tries) {
+            (void)Os::Task::delay(Fw::TimeInterval(0, 5000));
+        }
+    }
+
     this->checkStatus(status);
-    if (status != Drv::I2cStatus::I2C_OK) {
-      if (writeBuff.isValid()) {
-        this->deallocate_out(0, writeBuff);
-      }
-      return;
-    }
-
     if (writeBuff.isValid()) {
-      this->deallocate_out(0, writeBuff);
+        this->deallocate_out(0, writeBuff);
     }
 
-    return;
-  }
+    return (status == Drv::I2cStatus::I2C_OK);
+}
 
-  F32 IMUWorkshop::readAxisValue(Fw::ExternalSerializeBufferWithMemberCopy& rdSerial, F32 conversionRate) {
-    U8 lsb, msb;
+F32 IMUWorkshop::readAxisValue(Fw::ExternalSerializeBufferWithMemberCopy& rdSerial, F32 conversionRate) {
+    U8 lsb = 0;
+    U8 msb = 0;
 
     // IMU sends data LSB first (little endian)
-    rdSerial.deserializeTo(lsb);
-    rdSerial.deserializeTo(msb);
+    (void)rdSerial.deserializeTo(lsb);
+    (void)rdSerial.deserializeTo(msb);
 
     // Shift msb left 8 bits, then OR it with lsb. This gives the data as big-endian
     I16 val = static_cast<I16>(static_cast<U16>(lsb) | (static_cast<U16>(msb) << 8));
 
     return (static_cast<F32>(val)) / conversionRate;
-  }
+}
 
-  void IMUWorkshop::deserializeData(Fw::Buffer& readBuff) {
-    Fw::ExternalSerializeBufferWithMemberCopy
-            rdSerial = readBuff.getDeserializer();
+void IMUWorkshop::deserializeData(Fw::Buffer& readBuff) {
+    Fw::ExternalSerializeBufferWithMemberCopy rdSerial = readBuff.getDeserializer();
     rdSerial.resetDeser();
 
-    // Deserialize each F32 sensor reading directly into its named field,
-    // in the same order the IMU sends them
+    // Deserialize each sensor reading in the exact order the BNO055 returns them (0x08..0x34)
     this->tlmData.accX = this->readAxisValue(rdSerial, this->conversionRates[0]);
     this->tlmData.accY = this->readAxisValue(rdSerial, this->conversionRates[0]);
     this->tlmData.accZ = this->readAxisValue(rdSerial, this->conversionRates[0]);
@@ -407,6 +498,8 @@ void IMUWorkshop::checkStatus(Drv::I2cStatus i2cStatus) {
     this->tlmData.eulY = this->readAxisValue(rdSerial, this->conversionRates[3]);
     this->tlmData.eulZ = this->readAxisValue(rdSerial, this->conversionRates[3]);
 
+    // BNO055 quaternion block (0x20..0x27) starts with W before X, Y, Z
+    this->tlmData.quaW = this->readAxisValue(rdSerial, this->conversionRates[4]);
     this->tlmData.quaX = this->readAxisValue(rdSerial, this->conversionRates[4]);
     this->tlmData.quaY = this->readAxisValue(rdSerial, this->conversionRates[4]);
     this->tlmData.quaZ = this->readAxisValue(rdSerial, this->conversionRates[4]);
@@ -419,7 +512,7 @@ void IMUWorkshop::checkStatus(Drv::I2cStatus i2cStatus) {
     this->tlmData.grvY = this->readAxisValue(rdSerial, this->conversionRates[6]);
     this->tlmData.grvZ = this->readAxisValue(rdSerial, this->conversionRates[6]);
 
-    rdSerial.deserializeTo(this->tlmData.temp);
-  }
+    (void)rdSerial.deserializeTo(this->tlmData.temp);
+}
 
 }  // namespace Components

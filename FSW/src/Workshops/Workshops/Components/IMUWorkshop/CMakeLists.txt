@@ -19,8 +19,8 @@ register_fprime_library(
         "${CMAKE_CURRENT_LIST_DIR}/IMUWorkshop.fpp"
     SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/IMUWorkshop.cpp"
-#   DEPENDS
-#       MyPackage_MyOtherModule
+    DEPENDS
+        Os
 )
 
 ### Unit Tests ###

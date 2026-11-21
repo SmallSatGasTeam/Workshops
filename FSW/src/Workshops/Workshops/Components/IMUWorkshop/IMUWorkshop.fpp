@@ -112,7 +112,7 @@ module Components {
         ##############################################################################
 
         @ SchedIn: Called by the rate group to periodically retrieve data
-        sync input port schedIn: Svc.Sched
+        async input port schedIn: Svc.Sched drop
 
         @ i2cWrite: Used to write things to the i2c bus 
         output port i2cWrite: Drv.I2c

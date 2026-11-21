@@ -44,22 +44,28 @@ class IMUWorkshop final : public IMUWorkshopComponentBase {
     //! config
     //!
     //! Summary: Runs the configuration code
-    void config();
+    //! Return: true if the IMU reached NDOF fusion mode, false otherwise
+    bool config();
 
     //! readConfigReg
     //!
-    //! Summary: Reads one byte from a configuration register
-    //! Parameters: U8 addr, Address of register to read from
-    //! Return: Byte received from register at "addr" (U8)
-    U8 readConfigReg(U8 addr);
+    //! Summary: Reads one byte from a configuration register with retry and reserved-bit validation
+    //! Parameters:
+    //!   - U8 addr, Address of register to read from
+    //!   - U8& val, Output byte received from register at "addr"
+    //!   - U8 reservedMask, Mask of bits expected to be 0 (detects I2C clock-stretch bit corruption)
+    //! Return: true on valid read, false on failure
+    bool readConfigReg(U8 addr, U8& val, U8 reservedMask = 0x00);
 
-    //! readConfigReg
+    //! writeConfigReg
     //!
-    //! Summary: Writes one byte from a configuration register
+    //! Summary: Writes one byte to a configuration register
     //! Parameters:
     //!   - U8 addr, Address of register to write to
     //!   - U8 byte, Data to be written
-    void writeConfigReg(U8 addr, U8 byte);
+    //!   - U32 maxRetries, Maximum number of I2C write attempts
+    //! Return: true on successful write, false on failure
+    bool writeConfigReg(U8 addr, U8 byte, U32 maxRetries = MAX_I2C_RETRIES);
 
     //! deserializeData
     //!
@@ -144,20 +150,21 @@ class IMUWorkshop final : public IMUWorkshopComponentBase {
 
     //! Deserialized IMU sensor readings, one named field per axis, in the
     //! exact order the IMU returns them starting at DATA_ADDR (3 axes per
-    //! reading, followed by a single temperature byte).
+    //! vector reading, 4 components W/X/Y/Z for quaternion, followed by a
+    //! single temperature byte — 45 bytes total from 0x08 through 0x34).
     struct ImuTlmData {
       F32 accX, accY, accZ;
       F32 magX, magY, magZ;
       F32 gyrX, gyrY, gyrZ;
       F32 eulX, eulY, eulZ;
-      F32 quaX, quaY, quaZ;
+      F32 quaW, quaX, quaY, quaZ;
       F32 liaX, liaY, liaZ;
       F32 grvX, grvY, grvZ;
       I8 temp;
     };
 
     //! Most recently deserialized sensor readings
-    ImuTlmData tlmData;
+    ImuTlmData tlmData{};
 
   private:
 
@@ -179,26 +186,31 @@ class IMUWorkshop final : public IMUWorkshopComponentBase {
 
     //IMU Address Constants
     static constexpr U8 ADDRESS = 0x28;
+    static constexpr U8 PAGE_ID = 0x07;
     static constexpr U8 DATA_ADDR = 0x08;
-    static constexpr U8 PWR_MODE = 0X3E;
+    static constexpr U8 PWR_MODE = 0x3E;
     static constexpr U8 OPR_MODE = 0x3D;
     static constexpr U8 SYS_STATUS = 0x39;
     static constexpr U8 SYS_ERR = 0x3A;
     static constexpr U8 SYS_TRIGGER = 0x3F;
 
     //Other Constants
-    static constexpr U32 NUM_DT_BYT = 43;
+    static constexpr U32 NUM_DT_BYT = 45;
+    static constexpr U8 CONFIG_MODE = 0x00;
+    static constexpr U8 PWR_NORMAL = 0x00;
     static constexpr U8 NDOF = 0x0C;
     static constexpr U8 FUSION_RUNNING = 0x05;
     static constexpr U8 NO_ERR = 0x00;
     static constexpr U8 RESET_IMU = 0x20;
     static constexpr U8 CONFIG_ERROR = 0x01;
+    static constexpr U32 MAX_I2C_RETRIES = 5;
+    static constexpr U32 MAX_FUSION_POLLS = 20;
 
     //Variables
-    U32 calls;
-    U32 configFails;
-    U32 resets;
-    bool initialized;
+    U32 calls = 0;
+    U32 configFails = 0;
+    U32 resets = 0;
+    bool initialized = false;
 
     /*
       [0] = ACC
